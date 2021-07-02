@@ -1,3 +1,3 @@
-module emilesalem/go/workerpool
+module github.com/emilesalem/workerpool
 
 go 1.16
