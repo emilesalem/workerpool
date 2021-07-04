@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/emilesalem/workerpool/internal/work"
 )
 
 type Worker struct {
@@ -19,7 +21,7 @@ func CreateWorker(baseCtx context.Context) Worker {
 	}
 }
 
-func (w Worker) Do(jobs chan func(), doneJobs chan time.Duration, wg *sync.WaitGroup) {
+func (w Worker) Do(jobs chan work.Job, doneJobs chan work.Job, wg *sync.WaitGroup) {
 	wg.Add(1)
 	for {
 		select {
@@ -29,8 +31,10 @@ func (w Worker) Do(jobs chan func(), doneJobs chan time.Duration, wg *sync.WaitG
 				return
 			}
 			start := time.Now()
-			j()
-			doneJobs <- time.Since(start)
+			result := j.Work()
+			j.Result = result
+			j.Elapsed = time.Since(start)
+			doneJobs <- j
 		case <-w.ctx.Done():
 			wg.Done()
 			return

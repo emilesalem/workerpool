@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/emilesalem/workerpool/internal/work"
 	"github.com/emilesalem/workerpool/internal/worker"
+	"github.com/google/uuid"
 )
 
 const (
@@ -19,64 +21,77 @@ type Workerpool struct {
 	workforce       chan worker.Worker
 	ctx             context.Context
 	load            chan int8
-	jobOrders       chan func()
-	dispatch        chan func()
-	doneJobs        chan time.Duration
+	dispatch        chan work.Job
+	doneJobs        chan work.Job
 	workerWaitGroup sync.WaitGroup
+	jobRequests     sync.Map
 }
 
-func CreateWorkerpool(ctx context.Context, jobOrders chan func()) *Workerpool {
+func CreateWorkerpool(ctx context.Context) *Workerpool {
 	return &Workerpool{
 		ctx:       ctx,
-		jobOrders: jobOrders,
 		workforce: make(chan worker.Worker),
 		load:      make(chan int8),
-		dispatch:  make(chan func(), 1000000),
-		doneJobs:  make(chan time.Duration),
+		dispatch:  make(chan work.Job, 1000000),
+		doneJobs:  make(chan work.Job),
 	}
 }
 
 func (p *Workerpool) Work() {
-	go p.workersWork()
-	go p.monitorLoad()
-	go p.dispatchJobs()
-	go p.monitorJobs()
+	var w sync.WaitGroup
+	w.Add(2)
+	go p.dispatchWork()
+	go p.monitorLoad(&w)
+	go p.monitorJobs(&w)
 	<-p.ctx.Done()
 	p.workerWaitGroup.Wait()
 	close(p.doneJobs)
+	w.Wait()
 }
 
-func (p *Workerpool) workersWork() {
+func (p *Workerpool) dispatchWork() {
 	for w := range p.workforce {
 		go w.Do(p.dispatch, p.doneJobs, &p.workerWaitGroup)
 	}
 }
 
-func (p *Workerpool) dispatchJobs() {
-	requests := 0
-	for j := range p.jobOrders {
-		requests++
+func (p *Workerpool) Do(w func() interface{}) <-chan interface{} {
+	c := make(chan interface{})
+	go func() {
+		job := work.Job{
+			ID:   uuid.New(),
+			Work: w,
+		}
 		p.load <- 1
-		p.dispatch <- j
-	}
-	close(p.dispatch)
-	fmt.Printf("jobs requested: %v\n", requests)
+		p.dispatch <- job
+		p.jobRequests.Store(job.ID.String(), c)
+	}()
+	return c
 }
 
-func (p *Workerpool) monitorJobs() {
+func (p *Workerpool) monitorJobs(w *sync.WaitGroup) {
 	var jobsDone int64
 	var avgWorkTime int64
-	for timeWorked := range p.doneJobs {
+	for j := range p.doneJobs {
+		go p.respond(j)
 		jobsDone++
-		avgWorkTime = int64((float64(avgWorkTime*(jobsDone-1) + int64(timeWorked))) / float64(jobsDone))
+		avgWorkTime = int64((float64(avgWorkTime*(jobsDone-1) + int64(j.Elapsed))) / float64(jobsDone))
 		p.load <- -1
 	}
 	close(p.load)
 	fmt.Printf("requests served: %v\n", jobsDone)
 	fmt.Printf("average time to work: %s\n", time.Duration(avgWorkTime))
+	w.Done()
 }
 
-func (p *Workerpool) monitorLoad() {
+func (p *Workerpool) respond(job work.Job) {
+	v, _ := p.jobRequests.LoadAndDelete(job.ID.String())
+	c := v.(chan interface{})
+	c <- job.Result
+	close(c)
+}
+
+func (p *Workerpool) monitorLoad(w *sync.WaitGroup) {
 	maxWorkers := 0
 	totalLoad := 0
 	for x := range p.load {
@@ -97,6 +112,7 @@ func (p *Workerpool) monitorLoad() {
 		}
 	}
 	fmt.Printf("max number of concurrent workers: %v\n", maxWorkers)
+	w.Done()
 }
 
 func (p *Workerpool) addWorker() {
